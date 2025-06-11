@@ -1,17 +1,15 @@
 #!/data/data/com.termux/files/usr/bin/bash
 
-# Script melhorado para instalação e execução do WuzAPI com múltiplos usuários
-# Versão com separação de fases: Instalação -> Configuração -> Inicialização
+# Script definitivo para instalação do WuzAPI com múltiplos usuários
 
-# Configurações
+# Configurações principais
 ADMIN_TOKEN="3129"
 declare -A USERS=(
     ["7774"]="8080"  # Token: 7774, Porta: 8080
     ["7775"]="8081"  # Token: 7775, Porta: 8081
 )
 REPO_URL="https://github.com/WUZAPI-CHAT-BOT/WUZAPI-CHAT-BOT.git"
-LOG_FILE="/storage/emulated/0/Tasker/termux/TASKER-WUZAPI/logs/wuzapi_install.log"
-CONTROL_FILE="/storage/emulated/0/Tasker/termux/TASKER-WUZAPI/wuzapi_control.txt"
+LOG_FILE="/storage/emulated/0/Tasker/termux/TASKER-WUZAPI/logs/wuzapi_final.log"
 
 # Cores para melhor visualização
 RED='\033[0;31m'
@@ -19,8 +17,11 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
-PURPLE='\033[0;35m'
 NC='\033[0m' # No Color
+
+# Variáveis globais
+declare -A INSTANCE_PIDS
+declare -A INSTANCE_DIRS
 
 # Função para registrar logs
 log() {
@@ -29,8 +30,8 @@ log() {
 
 # Função para mostrar status
 show_step() {
-    echo -e "${YELLOW}>> ETAPA $1: $2${NC}"
-    log ">> ETAPA $1: $2"
+    echo -e "${YELLOW}\n▶ ETAPA $1: $2${NC}"
+    log "▶ ETAPA $1: $2"
 }
 
 # Função para mostrar sucesso
@@ -43,94 +44,53 @@ show_success() {
 show_error() {
     echo -e "${RED}✗ ERRO: $1${NC}"
     log "✗ ERRO: $1"
-}
-
-# Função para mostrar aviso
-show_warning() {
-    echo -e "${PURPLE}⚠ $1${NC}"
-    log "⚠ $1"
-}
-
-# Função para salvar status no arquivo de controle
-save_status() {
-    echo "$1" > "$CONTROL_FILE"
-    log "Status salvo: $1"
-}
-
-# Função para ler status do arquivo de controle
-read_status() {
-    if [ -f "$CONTROL_FILE" ]; then
-        cat "$CONTROL_FILE"
-    else
-        echo "NOT_STARTED"
-    fi
+    [ "$2" == "fatal" ] && exit 1
 }
 
 # Configurar ambiente
 setup_environment() {
     show_step 1 "Configurando ambiente Termux"
     
-    # Criar diretórios necessários
-    mkdir -p "$(dirname "$LOG_FILE")"
-    mkdir -p "$(dirname "$CONTROL_FILE")"
-    touch "$LOG_FILE" || show_error "Não foi possível criar arquivo de log"
+    # Criar diretório de logs
+    mkdir -p "$(dirname "$LOG_FILE")" || show_error "Falha ao criar diretório de logs" "fatal"
+    touch "$LOG_FILE" || show_error "Não foi possível criar arquivo de log" "fatal"
     
     # Configurar permissões
     termux-setup-storage
     sleep 5
     
-    if [ -d "/storage/emulated/0" ]; then
-        show_success "Permissões de armazenamento concedidas"
-    else
-        show_error "Falha ao obter permissões de armazenamento"
-        return 1
+    if [ ! -d "/storage/emulated/0" ]; then
+        show_error "Falha ao obter permissões de armazenamento" "fatal"
     fi
     
     # Permitir apps externos
     mkdir -p ~/.termux
     echo "allow-external-apps=true" > ~/.termux/termux.properties
     pkill -TERM com.termux >/dev/null 2>&1
-    show_success "Apps externos permitidos"
-    
-    save_status "ENVIRONMENT_SETUP"
-    return 0
+    sleep 2
+    show_success "Ambiente configurado com sucesso"
 }
 
 # Instalar dependências
 install_dependencies() {
-    show_step 2 "Atualizando pacotes e instalando dependências"
+    show_step 2 "Instalando dependências"
     
-    pkg update -y && pkg upgrade -y
-    if [ $? -eq 0 ]; then
-        show_success "Pacotes atualizados com sucesso"
-    else
-        show_error "Falha ao atualizar pacotes"
-        return 1
+    echo -e "${CYAN}Atualizando pacotes...${NC}"
+    pkg update -y && pkg upgrade -y || show_error "Falha ao atualizar pacotes" "fatal"
+    
+    echo -e "${CYAN}Instalando Go, Git e ferramentas...${NC}"
+    pkg install -y golang git lsof psmisc || show_error "Falha ao instalar dependências" "fatal"
+    
+    if ! go version >/dev/null 2>&1; then
+        show_error "Go não está instalado corretamente" "fatal"
     fi
     
-    pkg install -y golang git lsof curl
-    if [ $? -eq 0 ]; then
-        show_success "Dependências instaladas: Golang, Git, lsof, curl"
-    else
-        show_error "Falha ao instalar dependências"
-        return 1
-    fi
-    
-    # Verificar instalação do Go
-    if go version; then
-        show_success "Go instalado corretamente"
-    else
-        show_error "Problema na instalação do Go"
-        return 1
-    fi
-    
-    save_status "DEPENDENCIES_INSTALLED"
-    return 0
+    show_success "Todas dependências instaladas com sucesso"
 }
 
-# Configurar instâncias (SEM INICIALIZAR)
-setup_instances() {
-    show_step 3 "Configurando instâncias para cada usuário (SEM INICIALIZAR)"
+# Preparar instâncias
+prepare_instances() {
+    show_step 3 "Preparando instâncias"
     
     export GO111MODULE=on
     export GOPATH="$HOME/go"
@@ -138,42 +98,30 @@ setup_instances() {
     for USER_TOKEN in "${!USERS[@]}"; do
         PORT="${USERS[$USER_TOKEN]}"
         INSTANCE_DIR="$HOME/wuzapi_$USER_TOKEN"
+        INSTANCE_DIRS["$USER_TOKEN"]="$INSTANCE_DIR"
         
-        echo -e "${CYAN}\n=== CONFIGURANDO USUÁRIO $USER_TOKEN PARA PORTA $PORT ===${NC}"
-        log "Configurando usuário $USER_TOKEN para porta $PORT"
+        echo -e "${CYAN}\n● Preparando usuário $USER_TOKEN na porta $PORT${NC}"
         
-        # Clonar repositório
+        # Clonar ou atualizar repositório
         if [ -d "$INSTANCE_DIR" ]; then
             echo -e "${YELLOW}Diretório existente encontrado. Atualizando...${NC}"
-            cd "$INSTANCE_DIR"
-            git pull origin main
+            cd "$INSTANCE_DIR" || show_error "Falha ao acessar diretório" "continue"
+            git pull origin main || show_error "Falha ao atualizar repositório" "continue"
         else
             echo "Clonando repositório..."
-            git clone "$REPO_URL" "$INSTANCE_DIR"
+            git clone "$REPO_URL" "$INSTANCE_DIR" || show_error "Falha ao clonar repositório" "continue"
         fi
         
-        if [ $? -ne 0 ]; then
-            show_error "Falha ao clonar/atualizar repositório para $USER_TOKEN"
-            return 1
-        fi
-        
-        cd "$INSTANCE_DIR" || {
-            show_error "Não foi possível acessar $INSTANCE_DIR"
-            return 1
-        }
+        cd "$INSTANCE_DIR" || show_error "Falha ao acessar diretório da instância" "continue"
         
         # Instalar dependências do Go
-        echo "Instalando dependências do Go..."
+        echo "Instalando dependências..."
         go get -u go.mau.fi/whatsmeow@latest
         go mod tidy
         
         # Compilar
         echo "Compilando WuzAPI..."
-        go build .
-        if [ $? -ne 0 ]; then
-            show_error "Falha ao compilar para $USER_TOKEN"
-            return 1
-        fi
+        go build . || show_error "Falha ao compilar WuzAPI" "continue"
         
         # Criar arquivo de configuração
         cat << EOF > .env
@@ -182,265 +130,126 @@ TZ=America/Sao_Paulo
 SESSION_DEVICE_NAME=WuzAPI_$USER_TOKEN
 EOF
         
-        # Criar script de inicialização individual
-        cat << EOF > start_instance.sh
-#!/data/data/com.termux/files/usr/bin/bash
-cd "$INSTANCE_DIR"
-echo "Iniciando instância $USER_TOKEN na porta $PORT..."
-./wuzapi -logtype=json -color=true -port=$PORT
-EOF
-        chmod +x start_instance.sh
-        
-        show_success "Instância $USER_TOKEN configurada (PRONTA PARA INICIAR)"
+        show_success "Instância $USER_TOKEN preparada com sucesso"
     done
-    
-    save_status "INSTANCES_CONFIGURED"
-    return 0
 }
 
-# Criar scripts de controle
-create_control_scripts() {
-    show_step 4 "Criando scripts de controle"
-    
-    # Script para iniciar todas as instâncias
-    cat << 'EOF' > "$HOME/start_all_wuzapi.sh"
-#!/data/data/com.termux/files/usr/bin/bash
-
-# Configurações
-ADMIN_TOKEN="3129"
-declare -A USERS=(
-    ["7774"]="8080"
-    ["7775"]="8081"
-)
-CONTROL_FILE="/storage/emulated/0/Tasker/termux/TASKER-WUZAPI/wuzapi_control.txt"
-
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m'
-
-echo -e "${GREEN}======================================================${NC}"
-echo -e "${GREEN}           INICIANDO TODAS AS INSTÂNCIAS              ${NC}"
-echo -e "${GREEN}======================================================${NC}"
-
-# Liberar portas ocupadas
-for USER_TOKEN in "${!USERS[@]}"; do
-    PORT="${USERS[$USER_TOKEN]}"
-    PORT_PROCESS=$(lsof -t -i:$PORT 2>/dev/null)
-    if [ -n "$PORT_PROCESS" ]; then
-        echo -e "${YELLOW}Liberando porta $PORT (processo $PORT_PROCESS)${NC}"
-        kill -9 $PORT_PROCESS
-        sleep 2
-    fi
-done
-
 # Iniciar instâncias
-for USER_TOKEN in "${!USERS[@]}"; do
-    PORT="${USERS[$USER_TOKEN]}"
-    INSTANCE_DIR="$HOME/wuzapi_$USER_TOKEN"
+start_instances() {
+    show_step 4 "Iniciando todas as instâncias"
     
-    echo -e "${CYAN}Iniciando instância $USER_TOKEN na porta $PORT...${NC}"
-    
-    cd "$INSTANCE_DIR"
-    ./wuzapi -logtype=json -color=true -port=$PORT &
-    WUZAPI_PID=$!
-    echo $WUZAPI_PID > "$HOME/wuzapi_${USER_TOKEN}.pid"
-    
-    sleep 5
-    
-    # Verificar se está rodando
-    if ps -p $WUZAPI_PID > /dev/null; then
-        echo -e "${GREEN}✓ Instância $USER_TOKEN iniciada com PID $WUZAPI_PID${NC}"
+    for USER_TOKEN in "${!USERS[@]}"; do
+        PORT="${USERS[$USER_TOKEN]}"
+        INSTANCE_DIR="${INSTANCE_DIRS[$USER_TOKEN]}"
+        
+        echo -e "${CYAN}\n● Iniciando usuário $USER_TOKEN na porta $PORT${NC}"
+        
+        cd "$INSTANCE_DIR" || show_error "Falha ao acessar diretório da instância" "continue"
+        
+        # Liberar porta
+        PORT_PROCESS=$(lsof -t -i:$PORT)
+        if [ -n "$PORT_PROCESS" ]; then
+            echo -e "${YELLOW}Liberando porta $PORT (processo $PORT_PROCESS)${NC}"
+            kill -9 $PORT_PROCESS 2>/dev/null
+            sleep 2
+        fi
+        
+        # Iniciar instância
+        echo "Iniciando WuzAPI..."
+        nohup ./wuzapi -logtype=json -color=true -port=$PORT > "$INSTANCE_DIR/wuzapi.log" 2>&1 &
+        INSTANCE_PIDS["$USER_TOKEN"]=$!
+        sleep 15
+        
+        # Verificar se está rodando
+        if ps -p ${INSTANCE_PIDS["$USER_TOKEN"]} > /dev/null; then
+            show_success "Instância $USER_TOKEN iniciada com PID ${INSTANCE_PIDS["$USER_TOKEN"]}"
+        else
+            show_error "Falha ao iniciar instância $USER_TOKEN" "continue"
+        fi
         
         # Criar usuário
-        sleep 5
-        echo "Criando usuário $USER_TOKEN..."
+        echo "Registrando usuário..."
         curl -X POST "http://localhost:$PORT/admin/users" \
         -H "Authorization: $ADMIN_TOKEN" \
         -H "Content-Type: application/json" \
         -d '{"name":"user_'$USER_TOKEN'","token":"'$USER_TOKEN'","events":"All","webhook":""}' \
-        > /dev/null 2>&1
+        && show_success "Usuário $USER_TOKEN registrado com sucesso" \
+        || show_error "Falha ao registrar usuário $USER_TOKEN" "continue"
+    done
+}
+
+# Verificar instâncias
+verify_instances() {
+    show_step 5 "Verificando todas as instâncias"
+    
+    for USER_TOKEN in "${!USERS[@]}"; do
+        PORT="${USERS[$USER_TOKEN]}"
         
-        if [ $? -eq 0 ]; then
-            echo -e "${GREEN}✓ Usuário $USER_TOKEN criado${NC}"
+        echo -e "${CYAN}\n● Verificando usuário $USER_TOKEN na porta $PORT${NC}"
+        
+        # Verificar processo
+        if ! ps -p ${INSTANCE_PIDS["$USER_TOKEN"]} > /dev/null; then
+            show_error "Processo da instância $USER_TOKEN não está rodando" "continue"
+        fi
+        
+        # Verificar conexão HTTP
+        echo "Testando conexão..."
+        RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PORT/login?token=$USER_TOKEN" --connect-timeout 10)
+        
+        if [ "$RESPONSE" -eq 200 ]; then
+            show_success "Conexão do usuário $USER_TOKEN está ativa (HTTP 200)"
+            echo -e "${GREEN}URL para pareamento: http://localhost:$PORT/login?token=$USER_TOKEN${NC}"
         else
-            echo -e "${YELLOW}⚠ Usuário $USER_TOKEN pode já existir${NC}"
+            show_error "Falha na conexão do usuário $USER_TOKEN (HTTP $RESPONSE)" "continue"
         fi
-        
-    else
-        echo -e "${RED}✗ Falha ao iniciar instância $USER_TOKEN${NC}"
-    fi
-done
-
-echo "INSTANCES_RUNNING" > "$CONTROL_FILE"
-
-echo -e "${GREEN}\n======================================================${NC}"
-echo -e "${GREEN}         TODAS AS INSTÂNCIAS FORAM INICIADAS           ${NC}"
-echo -e "${GREEN}======================================================${NC}"
-echo -e "${YELLOW}\nPARA CONECTAR SEUS NÚMEROS:${NC}"
-
-for USER_TOKEN in "${!USERS[@]}"; do
-    PORT="${USERS[$USER_TOKEN]}"
-    echo -e "${CYAN}● TOKEN ${YELLOW}$USER_TOKEN${CYAN}: ${BLUE}http://localhost:$PORT/login?token=$USER_TOKEN${NC}"
-done
-
-echo -e "\n${GREEN}Agora você pode fazer o pareamento no Tasker!${NC}"
-EOF
-
-    chmod +x "$HOME/start_all_wuzapi.sh"
-    
-    # Script para parar todas as instâncias
-    cat << 'EOF' > "$HOME/stop_all_wuzapi.sh"
-#!/data/data/com.termux/files/usr/bin/bash
-
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
-
-echo -e "${YELLOW}Parando todas as instâncias WuzAPI...${NC}"
-
-# Parar por PID files
-for pidfile in "$HOME"/wuzapi_*.pid; do
-    if [ -f "$pidfile" ]; then
-        PID=$(cat "$pidfile")
-        if ps -p $PID > /dev/null; then
-            kill -9 $PID
-            echo -e "${GREEN}✓ Processo $PID parado${NC}"
-        fi
-        rm "$pidfile"
-    fi
-done
-
-# Parar por portas
-for PORT in 8080 8081; do
-    PORT_PROCESS=$(lsof -t -i:$PORT 2>/dev/null)
-    if [ -n "$PORT_PROCESS" ]; then
-        kill -9 $PORT_PROCESS
-        echo -e "${GREEN}✓ Porta $PORT liberada${NC}"
-    fi
-done
-
-echo "INSTANCES_STOPPED" > "/storage/emulated/0/Tasker/termux/TASKER-WUZAPI/wuzapi_control.txt"
-echo -e "${GREEN}Todas as instâncias foram paradas!${NC}"
-EOF
-
-    chmod +x "$HOME/stop_all_wuzapi.sh"
-    
-    show_success "Scripts de controle criados"
-    show_success "  - $HOME/start_all_wuzapi.sh (Para iniciar)"
-    show_success "  - $HOME/stop_all_wuzapi.sh (Para parar)"
-    return 0
+    done
 }
 
 # Mostrar instruções finais
 show_final_instructions() {
-    echo -e "${GREEN}\n\n======================================================${NC}"
-    echo -e "${GREEN}          INSTALAÇÃO E CONFIGURAÇÃO CONCLUÍDA!        ${NC}"
-    echo -e "${GREEN}======================================================${NC}"
+    echo -e "${GREEN}\n\n======================================================"
+    echo "         INSTALAÇÃO CONCLUÍDA COM SUCESSO!          "
+    echo "======================================================"
+    echo -e "${YELLOW}\nPARA CONECTAR SEUS NÚMEROS:${NC}\n"
     
-    echo -e "${YELLOW}\n🎯 PRÓXIMOS PASSOS:${NC}"
-    echo -e "${CYAN}1. Configure seu Tasker conforme necessário${NC}"
-    echo -e "${CYAN}2. Quando estiver pronto para iniciar as instâncias, execute:${NC}"
-    echo -e "   ${BLUE}bash $HOME/start_all_wuzapi.sh${NC}"
-    echo ""
-    echo -e "${YELLOW}📋 COMANDOS DISPONÍVEIS:${NC}"
-    echo -e "${GREEN}• Iniciar todas as instâncias:${NC}"
-    echo -e "  ${BLUE}bash $HOME/start_all_wuzapi.sh${NC}"
-    echo -e "${GREEN}• Parar todas as instâncias:${NC}"
-    echo -e "  ${BLUE}bash $HOME/stop_all_wuzapi.sh${NC}"
-    echo ""
-    echo -e "${YELLOW}🔗 URLS DE PAREAMENTO (após iniciar):${NC}"
     for USER_TOKEN in "${!USERS[@]}"; do
         PORT="${USERS[$USER_TOKEN]}"
-        echo -e "${CYAN}• Token ${YELLOW}$USER_TOKEN${CYAN}: ${BLUE}http://localhost:$PORT/login?token=$USER_TOKEN${NC}"
+        echo -e "${CYAN}● NÚMERO COM TOKEN ${YELLOW}$USER_TOKEN${CYAN}:${NC}"
+        echo "  1. Abra no navegador:"
+        echo -e "     ${BLUE}http://localhost:$PORT/login?token=$USER_TOKEN${NC}"
+        echo "  2. Escaneie o QR code com o WhatsApp correspondente"
+        echo ""
     done
     
-    echo -e "\n${GREEN}======================================================${NC}"
-    echo -e "${GREEN}   CONFIGURAÇÃO FINALIZADA - PRONTO PARA O TASKER!    ${NC}"
-    echo -e "${GREEN}======================================================${NC}\n"
+    echo -e "${GREEN}======================================================"
+    echo -e "${YELLOW}INFORMAÇÕES IMPORTANTES:${NC}"
+    echo "1. Mantenha o Termux aberto em segundo plano"
+    echo "2. Não feche esta sessão do Termux"
+    echo "3. Logs completos em:"
+    echo -e "   ${BLUE}$LOG_FILE${NC}"
+    echo -e "4. Logs individuais em:"
+    for USER_TOKEN in "${!USERS[@]}"; do
+        echo -e "   ${BLUE}${INSTANCE_DIRS[$USER_TOKEN]}/wuzapi.log${NC}"
+    done
+    echo -e "${GREEN}======================================================"
+    echo -e "       AMBAS INSTÂNCIAS ESTÃO PRONTAS PARA PAREMETO!      "
+    echo -e "======================================================${NC}"
     
-    save_status "SETUP_COMPLETE"
-}
-
-# Função para verificar status e continuar de onde parou
-check_and_continue() {
-    local current_status=$(read_status)
-    
-    case "$current_status" in
-        "NOT_STARTED")
-            echo -e "${CYAN}Iniciando instalação completa...${NC}"
-            ;;
-        "ENVIRONMENT_SETUP")
-            echo -e "${YELLOW}Continuando da instalação de dependências...${NC}"
-            ;;
-        "DEPENDENCIES_INSTALLED")
-            echo -e "${YELLOW}Continuando da configuração de instâncias...${NC}"
-            ;;
-        "INSTANCES_CONFIGURED")
-            echo -e "${YELLOW}Continuando da criação de scripts...${NC}"
-            ;;
-        "SETUP_COMPLETE")
-            echo -e "${GREEN}Instalação já completa!${NC}"
-            show_final_instructions
-            return 0
-            ;;
-        "INSTANCES_RUNNING")
-            echo -e "${GREEN}Instâncias já estão rodando!${NC}"
-            echo -e "${BLUE}Use: bash $HOME/stop_all_wuzapi.sh para parar${NC}"
-            return 0
-            ;;
-    esac
-    
-    return 1
+    # Comando para manter o script rodando
+    while true; do sleep 3600; done
 }
 
 # Fluxo principal
 main() {
-    echo -e "${PURPLE}======================================================${NC}"
-    echo -e "${PURPLE}     WUZAPI MULTI-TOKEN INSTALLER & CONFIGURATOR      ${NC}"
-    echo -e "${PURPLE}======================================================${NC}\n"
+    clear
+    echo -e "${GREEN}Iniciando instalação do WuzAPI para múltiplos usuários...${NC}"
     
-    # Verificar se pode continuar de onde parou
-    if check_and_continue; then
-        return 0
-    fi
-    
-    local current_status=$(read_status)
-    
-    # Executar etapas conforme o status
-    case "$current_status" in
-        "NOT_STARTED")
-            if ! setup_environment; then
-                show_error "Falha na configuração do ambiente"
-                exit 1
-            fi
-            ;&  # Continua para a próxima etapa
-        "ENVIRONMENT_SETUP")
-            if ! install_dependencies; then
-                show_error "Falha na instalação de dependências"
-                exit 1
-            fi
-            ;&  # Continua para a próxima etapa
-        "DEPENDENCIES_INSTALLED")
-            if ! setup_instances; then
-                show_error "Falha na configuração das instâncias"
-                exit 1
-            fi
-            ;&  # Continua para a próxima etapa
-        "INSTANCES_CONFIGURED")
-            if ! create_control_scripts; then
-                show_error "Falha na criação dos scripts de controle"
-                exit 1
-            fi
-            show_final_instructions
-            ;;
-    esac
+    setup_environment
+    install_dependencies
+    prepare_instances
+    start_instances
+    verify_instances
+    show_final_instructions
 }
 
-# Executar apenas se o script foi chamado diretamente
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    main "$@"
-fi
+main
